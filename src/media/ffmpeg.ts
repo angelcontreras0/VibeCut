@@ -1,5 +1,6 @@
 import { FFmpeg } from "@ffmpeg/ffmpeg";
 import { argsFor, budget, type Settings } from "./export";
+import { browserDecodeAv1Selection, looksLikeAv1 } from "./browserAv1";
 
 let engine: FFmpeg | null = null;
 
@@ -51,8 +52,6 @@ async function safeDelete(f: FFmpeg, path: string) {
 
 async function detectVideoCodec(f: FFmpeg, input: string, logs: string[]) {
   logs.length = 0;
-  // Intentionally run FFmpeg without an output. It exits with an error, but it
-  // prints container/stream metadata without decoding the whole video.
   await f.exec(["-hide_banner", "-i", input]);
   const text = logs.join("\n");
   const match = text.match(/Video:\s*([^,\s]+)/i);
@@ -68,22 +67,52 @@ export async function exportMedia(
   progress: (n: number) => void,
   status: (s: string) => void,
 ) {
-  status("Preparando motor local…");
+  const duration = Math.max(0.01, end - start);
+
+  // Medal can produce valid AV1 MP4 files that Chrome/Edge play correctly but
+  // the lightweight FFmpeg.wasm decoder fails with "Missing Sequence Header".
+  // Detect `av01` in the MP4 metadata and let the browser decode only the
+  // selected section to a temporary WebM. FFmpeg then receives a small,
+  // compatible clip instead of decoding the original AV1 stream.
+  let browserIntermediate: Blob | null = null;
+  let sourceWasBrowserAv1 = false;
+  if (video) {
+    try {
+      sourceWasBrowserAv1 = await looksLikeAv1(file);
+    } catch {
+      sourceWasBrowserAv1 = false;
+    }
+    if (sourceWasBrowserAv1) {
+      status("Clip AV1 de Medal detectado…");
+      browserIntermediate = await browserDecodeAv1Selection(
+        file,
+        start,
+        end,
+        status,
+        progress,
+      );
+    }
+  }
+
+  status(sourceWasBrowserAv1 ? "Preparando exportación final…" : "Preparando motor local…");
   const f = await getEngine();
+
   const ext =
     file.name
       .split(".")
       .pop()
       ?.replace(/[^a-z0-9]/gi, "")
       .toLowerCase() || "bin";
-  const input = `input.${ext}`;
+  const input = sourceWasBrowserAv1 ? "browser-av1.webm" : `input.${ext}`;
   const trimmed = `trimmed.${ext}`;
   const out = `output.${s.format}`;
-  const duration = Math.max(0.01, end - start);
 
   const logs: string[] = [];
-  const listener = ({ time }: { time: number }) =>
-    progress(Math.min(98, Math.max(0, (time / 1e6 / duration) * 100)));
+  const listener = ({ time }: { time: number }) => {
+    const base = sourceWasBrowserAv1 ? 48 : 0;
+    const span = sourceWasBrowserAv1 ? 50 : 98;
+    progress(Math.min(98, base + Math.max(0, (time / 1e6 / duration) * span)));
+  };
   const logListener = ({ message }: { message: string }) => {
     logs.push(message);
     if (logs.length > 120) logs.shift();
@@ -93,15 +122,19 @@ export async function exportMedia(
   f.on("log", logListener);
 
   let workingInput = input;
-  let workingStart = start;
+  let workingStart = sourceWasBrowserAv1 ? 0 : start;
   let inputDeleted = false;
-  let sourceCodec = "unknown";
+  let sourceCodec = sourceWasBrowserAv1 ? "av1-browser" : "unknown";
 
   try {
-    status("Leyendo archivo…");
-    await f.writeFile(input, new Uint8Array(await file.arrayBuffer()));
+    status(sourceWasBrowserAv1 ? "Cargando fragmento compatible…" : "Leyendo archivo…");
+    if (browserIntermediate) {
+      await f.writeFile(input, new Uint8Array(await browserIntermediate.arrayBuffer()));
+    } else {
+      await f.writeFile(input, new Uint8Array(await file.arrayBuffer()));
+    }
 
-    if (video) {
+    if (video && !sourceWasBrowserAv1) {
       status("Detectando codec…");
       try {
         sourceCodec = await detectVideoCodec(f, input, logs);
@@ -110,20 +143,9 @@ export async function exportMedia(
       }
     }
 
-    const isAv1 = sourceCodec === "av1";
     const isHevc = sourceCodec === "hevc" || sourceCodec === "h265";
 
-    // AV1 clips (commonly produced by Medal on newer GPUs) must keep the
-    // original MP4/container context until the decoder has read its sequence
-    // headers. A mid-stream `-c copy` can create a temporary clip that begins
-    // without the required AV1 sequence header, causing "Missing Sequence
-    // Header" / EOF failures. For AV1 we therefore transcode directly from the
-    // original input and seek only after opening it.
-    if (video && isAv1) {
-      status("Clip AV1 detectado · modo Medal…");
-      workingInput = input;
-      workingStart = start;
-    } else if (video) {
+    if (video && !sourceWasBrowserAv1) {
       const padBefore = Math.min(isHevc ? 4 : 3, Math.max(0, start));
       const preStart = Math.max(0, start - padBefore);
       const preDuration = duration + padBefore + 3;
@@ -173,15 +195,14 @@ export async function exportMedia(
     for (const codec of codecs) {
       for (let attempt = 0; attempt < 4; attempt++) {
         status(
-          isAv1 && codec === "libx264"
-            ? "Convirtiendo AV1 a H.264…"
+          sourceWasBrowserAv1 && codec === "libx264"
+            ? "Finalizando Medal AV1 en H.264…"
             : codec === "mpeg4"
               ? "Probando modo compatible…"
               : attempt
                 ? "Ajustando al límite de tamaño…"
                 : "Exportando…",
         );
-        progress(0);
         logs.length = 0;
         await safeDelete(f, out);
 
