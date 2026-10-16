@@ -1,0 +1,31 @@
+name: Apply VibeCut hotfix
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/hotfix-io-export.mjs
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply source patch
+        run: node scripts/hotfix-io-export.mjs
+      - name: Remove one-shot hotfix files
+        run: |
+          rm -f scripts/hotfix-io-export.mjs
+          rm -f .github/workflows/apply-hotfix.yml
+      - name: Commit hotfix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: stabilize I/O points and export fallback"
+          git push
