@@ -154,3 +154,4 @@ patch('src/media/ffmpeg.ts', [[
 ]]);
 
 console.log('VibeCut hotfix aplicado');
+// trigger one-shot workflow
