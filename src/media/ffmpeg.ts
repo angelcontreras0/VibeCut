@@ -10,11 +10,11 @@ export async function getEngine() {
     const f = new FFmpeg();
     engine = f;
     try {
-      const base = new URL(import.meta.env.BASE_URL, location.href);
+      const base = new URL(import.meta.env.BASE_URL, document.baseURI);
       const parts = await Promise.all(
         [0, 1].map(async (i) => {
           const response = await fetch(new URL(`ffmpeg/core-${i}.bin`, base));
-          if (!response.ok) throw new Error("load");
+          if (!response.ok) throw new Error(`asset ${i}: HTTP ${response.status}`);
           return response.arrayBuffer();
         }),
       );
@@ -32,7 +32,7 @@ export async function getEngine() {
       }
     } catch (e) {
       if (engine === f) engine = null;
-      throw e;
+      throw new Error(`load:${e instanceof Error ? e.message : String(e)}`);
     }
   }
   return engine;
@@ -56,40 +56,49 @@ export async function exportMedia(
     }`,
     out = `output.${s.format}`,
     duration = end - start;
+  const logs: string[] = [];
   const listener = ({ time }: { time: number }) =>
     progress(Math.min(98, Math.max(0, (time / 1e6 / duration) * 100)));
+  const logListener = ({ message }: { message: string }) => {
+    logs.push(message);
+    if (logs.length > 40) logs.shift();
+  };
   f.on("progress", listener);
+  f.on("log", logListener);
   try {
     await f.writeFile(input, new Uint8Array(await file.arrayBuffer()));
     const b = budget(duration, s, video);
     let rate = b.video;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      status(attempt ? "Ajustando al límite de tamaño…" : "Exportando…");
-      progress(0);
-      const code = await f.exec(
-        argsFor(input, out, start, duration, s, video, rate),
-      );
-      if (code !== 0) throw new Error("encode");
-      const data = (await f.readFile(out)) as Uint8Array;
-      if (!b.limit || data.byteLength < b.limit * 1e6) {
-        progress(100);
-        return new Blob([new Uint8Array(data)], {
-          type: video
-            ? s.format === "mp4"
-              ? "video/mp4"
-              : "video/webm"
-            : s.format === "mp3"
-              ? "audio/mpeg"
-              : "audio/wav",
-        });
+    const codecs = video && s.format === "mp4" ? ["libx264", "mpeg4"] : [undefined];
+    let lastError = "encode";
+    for (const codec of codecs) {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        status(codec === "mpeg4" ? "Probando modo compatible…" : attempt ? "Ajustando al límite de tamaño…" : "Exportando…");
+        progress(0);
+        logs.length = 0;
+        try { await f.deleteFile(out); } catch {}
+        const code = await f.exec(argsFor(input, out, start, duration, s, video, rate, codec));
+        if (code !== 0) {
+          lastError = logs.slice(-6).join(" | ") || `ffmpeg exit ${code}`;
+          break;
+        }
+        const data = (await f.readFile(out)) as Uint8Array;
+        if (!b.limit || data.byteLength < b.limit * 1e6) {
+          progress(100);
+          return new Blob([new Uint8Array(data)], {
+            type: video ? (s.format === "mp4" ? "video/mp4" : "video/webm") : (s.format === "mp3" ? "audio/mpeg" : "audio/wav"),
+          });
+        }
+        if (!video || s.format === "wav") throw new Error("limit");
+        rate = Math.floor(rate * ((b.limit * 1e6) / data.byteLength) * 0.88);
+        if (rate < 16) throw new Error("limit");
       }
-      if (!video || s.format === "wav") throw new Error("limit");
-      rate = Math.floor(rate * ((b.limit * 1e6) / data.byteLength) * 0.9);
-      if (rate < 16) throw new Error("limit");
+      rate = b.video;
     }
-    throw new Error("limit");
+    throw new Error(`encode:${lastError.slice(-300)}`);
   } finally {
     f.off("progress", listener);
+    f.off("log", logListener);
     for (const p of [input, out])
       try {
         await f.deleteFile(p);

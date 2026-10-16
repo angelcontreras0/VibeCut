@@ -194,8 +194,18 @@ export default function App() {
               (e.shiftKey ? 1 : e.altKey ? 0.001 : 1 / 30),
         );
       }
-      if (e.key.toLowerCase() === "i") setStart(Math.min(current, end - 0.01));
-      if (e.key.toLowerCase() === "o") setEnd(Math.max(current, start + 0.01));
+      if (e.key.toLowerCase() === "i") {
+        const t = clamp(media?.currentTime ?? current, 0, duration);
+        const r = range.current;
+        if (t >= r.end - 0.01) rangeChange(t, Math.min(duration, t + 0.01));
+        else rangeChange(t, r.end);
+      }
+      if (e.key.toLowerCase() === "o") {
+        const t = clamp(media?.currentTime ?? current, 0, duration);
+        const r = range.current;
+        if (t <= r.start + 0.01) rangeChange(Math.max(0, t - 0.01), t);
+        else rangeChange(r.start, t);
+      }
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
@@ -240,12 +250,18 @@ export default function App() {
           : settings.format.toUpperCase(),
       });
     } catch (e) {
-      if (!cancelled.current)
-        setError(
-          e instanceof Error && e.message === "limit"
-            ? "No pudimos alcanzar ese tamaño. Reduce la duración, baja la resolución o aumenta el límite."
-            : "No se pudo exportar. Puede ser un codec incompatible o falta de memoria. Prueba con un archivo más pequeño o con MP4/MP3.",
-        );
+      if (!cancelled.current) {
+        const message = e instanceof Error ? e.message : String(e);
+        console.error("VibeCut export error:", e);
+        if (message === "limit")
+          setError("No pudimos alcanzar ese tamaño. Reduce la duración, baja la resolución o aumenta el límite.");
+        else if (message.startsWith("load:"))
+          setError("No se pudo iniciar el motor local de exportación. Recarga la página e inténtalo otra vez. Si continúa, prueba Chrome o Edge actualizado.");
+        else if (/memory|out of bounds|allocation|oom/i.test(message))
+          setError("El navegador se quedó sin memoria durante la exportación. Prueba un corte más corto, baja la resolución o cierra otras pestañas.");
+        else
+          setError("No se pudo exportar este archivo. VibeCut ya intentó un codec alternativo. Prueba bajar la resolución o usar MP4 H.264 / MP3. Detalle: " + message.slice(0, 140));
+      }
     } finally {
       setBusy(false);
       busyRef.current = false;

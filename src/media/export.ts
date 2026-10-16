@@ -33,6 +33,7 @@ export function argsFor(
   s: Settings,
   video: boolean,
   rate?: number,
+  codecOverride?: string,
 ) {
   const args = ["-ss", String(start), "-i", input, "-t", String(duration)];
   const b = budget(duration, s, video);
@@ -42,10 +43,12 @@ export function argsFor(
       args.push("-vf", `scale=-2:'min(${s.resolution},ih)'`);
     else args.push("-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2");
     if (s.fps !== "original") args.push("-r", s.fps);
-    args.push("-c:v", s.format === "webm" ? "libvpx" : "libx264");
-    if (s.format === "mp4")
-      args.push("-preset", "ultrafast", "-pix_fmt", "yuv420p");
-    else args.push("-deadline", "realtime", "-cpu-used", "8");
+    const codec = codecOverride ?? (s.format === "webm" ? "libvpx" : "libx264");
+    args.push("-c:v", codec);
+    if (s.format === "mp4") {
+      if (codec === "libx264") args.push("-preset", "ultrafast");
+      args.push("-pix_fmt", "yuv420p");
+    } else args.push("-deadline", "realtime", "-cpu-used", "8");
     if (b.limit) args.push("-b:v", `${Math.max(16, rate ?? b.video)}k`);
     else args.push("-crf", s.format === "webm" ? "28" : "18");
     args.push(
