@@ -35,7 +35,10 @@ export function argsFor(
   rate?: number,
   codecOverride?: string,
 ) {
-  const args = ["-ss", String(start), "-i", input, "-t", String(duration)];
+  // IMPORTANT: seek after opening the input. Fast input seeking (-ss before -i)
+  // can skip codec headers on AV1 Medal/OBS clips and produce
+  // "Missing Sequence Header" / EOF decoding errors.
+  const args = ["-i", input, "-ss", String(start), "-t", String(duration)];
   const b = budget(duration, s, video);
   if (video) {
     args.push("-map", "0:v:0", "-map", "0:a:0?");
