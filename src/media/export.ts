@@ -17,11 +17,12 @@ export function budget(duration: number, s: Settings, video: boolean) {
         : s.mode === "custom"
           ? s.target
           : 0;
+  const audio = s.format === "gif" ? 0 : s.audio;
   const total = limit ? (limit * 1e6 * 8 * 0.925) / duration / 1000 : 0;
   return {
     limit,
-    video: Math.floor(total - s.audio),
-    audio: Math.min(s.audio, Math.floor(total)),
+    video: Math.floor(total - audio),
+    audio: Math.min(audio, Math.floor(total)),
     estimate: limit ? limit * 0.925 : 0,
   };
 }
