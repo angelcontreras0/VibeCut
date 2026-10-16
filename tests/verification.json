@@ -1,0 +1,11 @@
+{
+  "engine": "actual @ffmpeg/core WebAssembly",
+  "results": [
+    {"format":"mp4","size":672353,"duration":"5.000000","limit":0.7},
+    {"format":"webm","size":481726,"duration":"5.008000","limit":0.5},
+    {"format":"mp3","size":121773,"duration":"5.041633","limit":0},
+    {"format":"wav","size":441078,"duration":"5.000000","limit":0},
+    {"format":"mp4","size":18499723,"duration":60,"limit":20},
+    {"format":"mp4","size":9330529,"duration":60,"limit":10}
+  ]
+}
