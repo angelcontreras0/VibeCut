@@ -49,6 +49,16 @@ async function safeDelete(f: FFmpeg, path: string) {
   }
 }
 
+async function detectVideoCodec(f: FFmpeg, input: string, logs: string[]) {
+  logs.length = 0;
+  // Intentionally run FFmpeg without an output. It exits with an error, but it
+  // prints container/stream metadata without decoding the whole video.
+  await f.exec(["-hide_banner", "-i", input]);
+  const text = logs.join("\n");
+  const match = text.match(/Video:\s*([^,\s]+)/i);
+  return (match?.[1] || "unknown").toLowerCase();
+}
+
 export async function exportMedia(
   file: File,
   start: number,
@@ -76,7 +86,7 @@ export async function exportMedia(
     progress(Math.min(98, Math.max(0, (time / 1e6 / duration) * 100)));
   const logListener = ({ message }: { message: string }) => {
     logs.push(message);
-    if (logs.length > 80) logs.shift();
+    if (logs.length > 120) logs.shift();
   };
 
   f.on("progress", listener);
@@ -85,16 +95,36 @@ export async function exportMedia(
   let workingInput = input;
   let workingStart = start;
   let inputDeleted = false;
+  let sourceCodec = "unknown";
 
   try {
     status("Leyendo archivo…");
     await f.writeFile(input, new Uint8Array(await file.arrayBuffer()));
 
-    // Build a smaller temporary clip first when possible. Seek AFTER opening
-    // the input so codecs such as AV1 can read their sequence headers before
-    // FFmpeg jumps to the requested section.
     if (video) {
-      const padBefore = Math.min(3, Math.max(0, start));
+      status("Detectando codec…");
+      try {
+        sourceCodec = await detectVideoCodec(f, input, logs);
+      } catch {
+        sourceCodec = "unknown";
+      }
+    }
+
+    const isAv1 = sourceCodec === "av1";
+    const isHevc = sourceCodec === "hevc" || sourceCodec === "h265";
+
+    // AV1 clips (commonly produced by Medal on newer GPUs) must keep the
+    // original MP4/container context until the decoder has read its sequence
+    // headers. A mid-stream `-c copy` can create a temporary clip that begins
+    // without the required AV1 sequence header, causing "Missing Sequence
+    // Header" / EOF failures. For AV1 we therefore transcode directly from the
+    // original input and seek only after opening it.
+    if (video && isAv1) {
+      status("Clip AV1 detectado · modo Medal…");
+      workingInput = input;
+      workingStart = start;
+    } else if (video) {
+      const padBefore = Math.min(isHevc ? 4 : 3, Math.max(0, start));
       const preStart = Math.max(0, start - padBefore);
       const preDuration = duration + padBefore + 3;
 
@@ -143,11 +173,13 @@ export async function exportMedia(
     for (const codec of codecs) {
       for (let attempt = 0; attempt < 4; attempt++) {
         status(
-          codec === "mpeg4"
-            ? "Probando modo compatible…"
-            : attempt
-              ? "Ajustando al límite de tamaño…"
-              : "Exportando…",
+          isAv1 && codec === "libx264"
+            ? "Convirtiendo AV1 a H.264…"
+            : codec === "mpeg4"
+              ? "Probando modo compatible…"
+              : attempt
+                ? "Ajustando al límite de tamaño…"
+                : "Exportando…",
         );
         progress(0);
         logs.length = 0;
@@ -157,7 +189,7 @@ export async function exportMedia(
           argsFor(workingInput, out, workingStart, duration, s, video, rate, codec),
         );
         if (code !== 0) {
-          lastError = logs.slice(-10).join(" | ") || `ffmpeg exit ${code}`;
+          lastError = logs.slice(-12).join(" | ") || `ffmpeg exit ${code}`;
           break;
         }
 
@@ -182,7 +214,8 @@ export async function exportMedia(
       rate = b.video;
     }
 
-    throw new Error(`encode:${lastError.slice(-500)}`);
+    const codecHint = sourceCodec !== "unknown" ? ` [origen: ${sourceCodec}]` : "";
+    throw new Error(`encode:${lastError.slice(-460)}${codecHint}`);
   } finally {
     f.off("progress", listener);
     f.off("log", logListener);
