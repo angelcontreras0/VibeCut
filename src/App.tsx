@@ -86,6 +86,22 @@ export default function App() {
     [result],
   );
   useEffect(() => {
+    if (error) {
+      document.title = "VibeCut — Error";
+      return;
+    }
+    if (busy) {
+      const pct = Math.max(0, Math.min(100, Math.round(progress)));
+      document.title = pct > 0 ? `VibeCut — ${pct}%` : "VibeCut — Renderizando...";
+      return;
+    }
+    if (result) {
+      document.title = "VibeCut — Listo ✓";
+      return;
+    }
+    document.title = "VibeCut";
+  }, [busy, progress, result, error]);
+  useEffect(() => {
     if (!media || !playing) return;
     let id = 0;
     const tick = () => {
