@@ -66,3 +66,5 @@ No hay backend, cuentas, trackers ni subida de archivos. El video/audio se queda
 ## Notas
 
 La compatibilidad de previsualización depende del navegador y del codec del archivo. Para una experiencia más consistente se recomienda MP4 H.264 para video y MP3/WAV para audio. Archivos grandes pueden requerir bastante memoria porque FFmpeg.wasm procesa todo localmente.
+
+_Deploy de GitHub Pages activado mediante GitHub Actions._
