@@ -1,10 +1,13 @@
 import { FFmpeg } from "@ffmpeg/ffmpeg";
 import { argsFor, budget, type Settings } from "./export";
+
 let engine: FFmpeg | null = null;
+
 export function cancel() {
   engine?.terminate();
   engine = null;
 }
+
 export async function getEngine() {
   if (!engine) {
     const f = new FFmpeg();
@@ -37,6 +40,15 @@ export async function getEngine() {
   }
   return engine;
 }
+
+async function safeDelete(f: FFmpeg, path: string) {
+  try {
+    await f.deleteFile(path);
+  } catch {
+    // File may not exist or the engine may have been terminated.
+  }
+}
+
 export async function exportMedia(
   file: File,
   start: number,
@@ -48,65 +60,142 @@ export async function exportMedia(
 ) {
   status("Preparando motor local…");
   const f = await getEngine();
-  const input = `input.${
-      file.name
-        .split(".")
-        .pop()
-        ?.replace(/[^a-z0-9]/gi, "") || "bin"
-    }`,
-    out = `output.${s.format}`,
-    duration = end - start;
+  const ext =
+    file.name
+      .split(".")
+      .pop()
+      ?.replace(/[^a-z0-9]/gi, "")
+      .toLowerCase() || "bin";
+  const input = `input.${ext}`;
+  const trimmed = `trimmed.${ext}`;
+  const out = `output.${s.format}`;
+  const duration = Math.max(0.01, end - start);
+
   const logs: string[] = [];
   const listener = ({ time }: { time: number }) =>
     progress(Math.min(98, Math.max(0, (time / 1e6 / duration) * 100)));
   const logListener = ({ message }: { message: string }) => {
     logs.push(message);
-    if (logs.length > 40) logs.shift();
+    if (logs.length > 60) logs.shift();
   };
+
   f.on("progress", listener);
   f.on("log", logListener);
+
+  let workingInput = input;
+  let workingStart = start;
+  let inputDeleted = false;
+
   try {
+    status("Leyendo archivo…");
     await f.writeFile(input, new Uint8Array(await file.arrayBuffer()));
+
+    // For video, first make a small stream-copy window around the selection.
+    // This avoids keeping a large Medal/OBS file in FFmpeg memory while decoding
+    // and greatly reduces WASM memory pressure and EOF/filter failures.
+    if (video) {
+      const padBefore = Math.min(2, Math.max(0, start));
+      const preStart = Math.max(0, start - padBefore);
+      const preDuration = duration + padBefore + 2;
+
+      status(file.size > 80e6 ? "Optimizando archivo grande…" : "Preparando el recorte…");
+      progress(0);
+      logs.length = 0;
+      await safeDelete(f, trimmed);
+
+      const copyArgs = [
+        "-ss",
+        String(preStart),
+        "-i",
+        input,
+        "-t",
+        String(preDuration),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-c",
+        "copy",
+        "-avoid_negative_ts",
+        "make_zero",
+        "-y",
+        trimmed,
+      ];
+
+      const copyCode = await f.exec(copyArgs);
+      if (copyCode === 0) {
+        workingInput = trimmed;
+        // Stream-copy seeking may begin at a keyframe before preStart. The small
+        // safety window lets the precise transcode seek inside the temporary clip.
+        workingStart = padBefore;
+        await safeDelete(f, input);
+        inputDeleted = true;
+      } else {
+        // If stream copy is not supported for this container, fall back to the
+        // original input instead of failing the whole export.
+        await safeDelete(f, trimmed);
+        workingInput = input;
+        workingStart = start;
+      }
+    }
+
     const b = budget(duration, s, video);
     let rate = b.video;
     const codecs = video && s.format === "mp4" ? ["libx264", "mpeg4"] : [undefined];
     let lastError = "encode";
+
     for (const codec of codecs) {
       for (let attempt = 0; attempt < 4; attempt++) {
-        status(codec === "mpeg4" ? "Probando modo compatible…" : attempt ? "Ajustando al límite de tamaño…" : "Exportando…");
+        status(
+          codec === "mpeg4"
+            ? "Probando modo compatible…"
+            : attempt
+              ? "Ajustando al límite de tamaño…"
+              : "Exportando…",
+        );
         progress(0);
         logs.length = 0;
-        try { await f.deleteFile(out); } catch {}
-        const code = await f.exec(argsFor(input, out, start, duration, s, video, rate, codec));
+        await safeDelete(f, out);
+
+        const code = await f.exec(
+          argsFor(workingInput, out, workingStart, duration, s, video, rate, codec),
+        );
         if (code !== 0) {
-          lastError = logs.slice(-6).join(" | ") || `ffmpeg exit ${code}`;
+          lastError = logs.slice(-8).join(" | ") || `ffmpeg exit ${code}`;
           break;
         }
+
         const data = (await f.readFile(out)) as Uint8Array;
         if (!b.limit || data.byteLength < b.limit * 1e6) {
           progress(100);
           return new Blob([new Uint8Array(data)], {
-            type: video ? (s.format === "mp4" ? "video/mp4" : "video/webm") : (s.format === "mp3" ? "audio/mpeg" : "audio/wav"),
+            type: video
+              ? s.format === "mp4"
+                ? "video/mp4"
+                : "video/webm"
+              : s.format === "mp3"
+                ? "audio/mpeg"
+                : "audio/wav",
           });
         }
+
         if (!video || s.format === "wav") throw new Error("limit");
         rate = Math.floor(rate * ((b.limit * 1e6) / data.byteLength) * 0.88);
         if (rate < 16) throw new Error("limit");
       }
       rate = b.video;
     }
-    throw new Error(`encode:${lastError.slice(-300)}`);
+
+    throw new Error(`encode:${lastError.slice(-400)}`);
   } finally {
     f.off("progress", listener);
     f.off("log", logListener);
-    for (const p of [input, out])
-      try {
-        await f.deleteFile(p);
-      } catch {
-        /* terminated */
-      }
+    if (!inputDeleted) await safeDelete(f, input);
+    await safeDelete(f, trimmed);
+    await safeDelete(f, out);
   }
 }
+
 export async function audioPreview(file: File) {
   const f = await getEngine();
   const input = "preview-input";
@@ -131,9 +220,7 @@ export async function audioPreview(file: File) {
       new Blob([new Uint8Array(bytes)], { type: "audio/wav" }),
     );
   } finally {
-    for (const p of [input, "preview.wav"])
-      try {
-        await f.deleteFile(p);
-      } catch {}
+    await safeDelete(f, input);
+    await safeDelete(f, "preview.wav");
   }
 }
