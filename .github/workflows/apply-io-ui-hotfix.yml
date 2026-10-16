@@ -1,0 +1,32 @@
+name: Apply VibeCut I-O UI hotfix
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/hotfix-io-ui.mjs'
+      - '.github/workflows/apply-io-ui-hotfix.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/hotfix-io-ui.mjs
+      - name: Commit hotfix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/App.tsx src/styles/app.css
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "fix: prevent I/O handle overlap and add shortcut hint"
+            git push
+          fi
