@@ -1,0 +1,28 @@
+{
+  "name": "vibecut",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "postinstall": "node scripts/prepare-core.mjs",
+    "prebuild": "node scripts/prepare-core.mjs"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@ffmpeg/core": "^0.12.10",
+    "wavesurfer.js": "^7.10.1",
+    "lucide-react": "^0.468.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.1.0",
+    "@vitejs/plugin-react": "^4.3.4"
+  }
+}
