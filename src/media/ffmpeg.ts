@@ -76,7 +76,7 @@ export async function exportMedia(
     progress(Math.min(98, Math.max(0, (time / 1e6 / duration) * 100)));
   const logListener = ({ message }: { message: string }) => {
     logs.push(message);
-    if (logs.length > 60) logs.shift();
+    if (logs.length > 80) logs.shift();
   };
 
   f.on("progress", listener);
@@ -90,13 +90,13 @@ export async function exportMedia(
     status("Leyendo archivo…");
     await f.writeFile(input, new Uint8Array(await file.arrayBuffer()));
 
-    // For video, first make a small stream-copy window around the selection.
-    // This avoids keeping a large Medal/OBS file in FFmpeg memory while decoding
-    // and greatly reduces WASM memory pressure and EOF/filter failures.
+    // Build a smaller temporary clip first when possible. Seek AFTER opening
+    // the input so codecs such as AV1 can read their sequence headers before
+    // FFmpeg jumps to the requested section.
     if (video) {
-      const padBefore = Math.min(2, Math.max(0, start));
+      const padBefore = Math.min(3, Math.max(0, start));
       const preStart = Math.max(0, start - padBefore);
-      const preDuration = duration + padBefore + 2;
+      const preDuration = duration + padBefore + 3;
 
       status(file.size > 80e6 ? "Optimizando archivo grande…" : "Preparando el recorte…");
       progress(0);
@@ -104,10 +104,10 @@ export async function exportMedia(
       await safeDelete(f, trimmed);
 
       const copyArgs = [
-        "-ss",
-        String(preStart),
         "-i",
         input,
+        "-ss",
+        String(preStart),
         "-t",
         String(preDuration),
         "-map",
@@ -125,14 +125,10 @@ export async function exportMedia(
       const copyCode = await f.exec(copyArgs);
       if (copyCode === 0) {
         workingInput = trimmed;
-        // Stream-copy seeking may begin at a keyframe before preStart. The small
-        // safety window lets the precise transcode seek inside the temporary clip.
         workingStart = padBefore;
         await safeDelete(f, input);
         inputDeleted = true;
       } else {
-        // If stream copy is not supported for this container, fall back to the
-        // original input instead of failing the whole export.
         await safeDelete(f, trimmed);
         workingInput = input;
         workingStart = start;
@@ -161,7 +157,7 @@ export async function exportMedia(
           argsFor(workingInput, out, workingStart, duration, s, video, rate, codec),
         );
         if (code !== 0) {
-          lastError = logs.slice(-8).join(" | ") || `ffmpeg exit ${code}`;
+          lastError = logs.slice(-10).join(" | ") || `ffmpeg exit ${code}`;
           break;
         }
 
@@ -186,7 +182,7 @@ export async function exportMedia(
       rate = b.video;
     }
 
-    throw new Error(`encode:${lastError.slice(-400)}`);
+    throw new Error(`encode:${lastError.slice(-500)}`);
   } finally {
     f.off("progress", listener);
     f.off("log", logListener);
