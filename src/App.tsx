@@ -22,7 +22,7 @@ import { Timeline } from "./components/Timeline";
 import { TimeInput } from "./components/TimeInput";
 import { ExportPanel } from "./components/ExportPanel";
 import { clamp, time, mb } from "./utils/time";
-import { exportMedia, cancel, audioPreview } from "./media/ffmpeg";
+import { exportMedia, cancel, audioPreview, gifPreview } from "./media/ffmpeg";
 import type { Settings } from "./media/export";
 const initial: Settings = {
   format: "mp4",
@@ -39,6 +39,7 @@ export default function App() {
     [url, setUrl] = useState(""),
     [waveUrl, setWaveUrl] = useState(""),
     [video, setVideo] = useState(true),
+    [isGif, setIsGif] = useState(false),
     [media, setMedia] = useState<HTMLMediaElement | null>(null),
     [duration, setDuration] = useState(0),
     [start, setStart] = useState(0),
@@ -119,14 +120,14 @@ export default function App() {
     id = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(id);
   }, [media, playing]);
-  function open(f?: File) {
+  async function open(f?: File) {
     if (!f || busyRef.current) return;
     const ext = f.name.split(".").pop()?.toLowerCase() || "";
     if (
-      !["mp4", "webm", "mov", "mp3", "wav", "m4a", "ogg", "aac"].includes(ext)
+      !["mp4", "webm", "mov", "gif", "mp3", "wav", "m4a", "ogg", "aac"].includes(ext)
     ) {
       setError(
-        "Este formato no está disponible. Prueba con MP4, WebM, MP3 o WAV.",
+        "Este formato no está disponible. Prueba con MP4, WebM, GIF, MP3 o WAV.",
       );
       return;
     }
@@ -137,10 +138,35 @@ export default function App() {
       return;
     }
     media?.pause();
-    const v = ["mp4", "webm", "mov"].includes(ext),
-      u = URL.createObjectURL(f);
+    const gif = ext === "gif";
+    const v = ["mp4", "webm", "mov", "gif"].includes(ext);
+    let u = URL.createObjectURL(f);
+
+    if (gif) {
+      busyRef.current = true;
+      cancelled.current = false;
+      setBusy(true);
+      setProgress(0);
+      setStatus("Preparando GIF…");
+      try {
+        const preview = await gifPreview(f);
+        if (cancelled.current) return;
+        URL.revokeObjectURL(u);
+        u = URL.createObjectURL(preview);
+      } catch (e) {
+        if (!cancelled.current)
+          setError("No pudimos preparar este GIF. Prueba con uno más pequeño o conviértelo primero a MP4.");
+        URL.revokeObjectURL(u);
+        return;
+      } finally {
+        setBusy(false);
+        busyRef.current = false;
+      }
+    }
+
     setFile(f);
     setVideo(v);
+    setIsGif(gif);
     setUrl(u);
     setWaveUrl(u);
     setDuration(0);
@@ -376,7 +402,7 @@ export default function App() {
               </button>
               <div className="formats">
                 <span>
-                  <FileVideo size={14} /> MP4 · WebM · MOV
+                  <FileVideo size={14} /> MP4 · WebM · MOV · GIF
                 </span>
                 <i />
                 <span>
@@ -607,8 +633,9 @@ export default function App() {
                       onRange={rangeChange}
                       onSeek={seek}
                       onWaveError={() => setWaveError(true)}
+                      silent={isGif}
                     />
-                    {waveError && (
+                    {waveError && !isGif && (
                       <div className="wave-error">
                         No se pudo leer el audio directamente.{" "}
                         <button disabled={busy} onClick={recoverWave}>
@@ -664,7 +691,7 @@ export default function App() {
           ref={picker}
           hidden
           type="file"
-          accept=".mp4,.webm,.mov,.mp3,.wav,.m4a,.ogg,.aac"
+          accept=".mp4,.webm,.mov,.gif,.mp3,.wav,.m4a,.ogg,.aac"
           onChange={(e) => {
             open(e.target.files?.[0]);
             e.target.value = "";

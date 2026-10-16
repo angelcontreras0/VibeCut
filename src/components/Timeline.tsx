@@ -13,6 +13,7 @@ interface Props {
   onRange: (a: number, b: number) => void;
   onSeek: (n: number) => void;
   onWaveError: () => void;
+  silent?: boolean;
 }
 export function Timeline(p: Props) {
   const track = useRef<HTMLDivElement>(null);
@@ -148,13 +149,17 @@ export function Timeline(p: Props) {
             <span key={i}>{time((p.duration * i) / 10).slice(3, 8)}</span>
           ))}
         </div>
-        <Waveform
-          url={p.url}
-          media={p.media}
-          zoom={0}
-          video={p.video}
-          onError={p.onWaveError}
-        />
+        {p.silent ? (
+          <div className="waveform" aria-hidden="true" />
+        ) : (
+          <Waveform
+            url={p.url}
+            media={p.media}
+            zoom={0}
+            video={p.video}
+            onError={p.onWaveError}
+          />
+        )}
         <div
           className="dim left"
           style={{ width: `${(p.start / p.duration) * 100}%` }}
