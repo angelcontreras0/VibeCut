@@ -58,6 +58,83 @@ async function detectVideoCodec(f: FFmpeg, input: string, logs: string[]) {
   return (match?.[1] || "unknown").toLowerCase();
 }
 
+function gifAttempt(s: Settings, attempt: number) {
+  const baseFps = s.fps === "original" ? 15 : Math.max(5, Number(s.fps) || 15);
+  const baseHeight = s.resolution === "original" ? 480 : Math.max(160, Number(s.resolution) || 480);
+  const fpsSteps = [1, 0.86, 0.72, 0.6, 0.5];
+  const heightSteps = [1, 0.92, 0.82, 0.72, 0.62];
+  const colors = [192, 160, 128, 96, 64];
+  return {
+    fps: Math.max(5, Math.round(baseFps * fpsSteps[Math.min(attempt, 4)])),
+    height: Math.max(160, Math.round((baseHeight * heightSteps[Math.min(attempt, 4)]) / 2) * 2),
+    colors: colors[Math.min(attempt, 4)],
+    dither: attempt < 2 ? "sierra2_4a" : "bayer:bayer_scale=4",
+  };
+}
+
+async function encodeGif(
+  f: FFmpeg,
+  input: string,
+  out: string,
+  start: number,
+  duration: number,
+  s: Settings,
+  progress: (n: number) => void,
+  status: (s: string) => void,
+  logs: string[],
+) {
+  const b = budget(duration, s, true);
+  const attempts = b.limit ? 5 : 1;
+  let lastSize = 0;
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const p = gifAttempt(s, attempt);
+    status(attempt ? "Optimizando GIF para alcanzar el tamaño…" : "Generando GIF optimizado…");
+    progress(Math.min(92, attempt * 18));
+    logs.length = 0;
+    await safeDelete(f, out);
+
+    const dither = p.dither.startsWith("bayer") ? p.dither : `dither=${p.dither}`;
+    const paletteUse = p.dither.startsWith("bayer")
+      ? `paletteuse=dither=${p.dither}:diff_mode=rectangle`
+      : `paletteuse=${dither}:diff_mode=rectangle`;
+    const filter =
+      `[0:v]fps=${p.fps},scale=-2:'min(${p.height},ih)':flags=lanczos,split[v0][v1];` +
+      `[v0]palettegen=max_colors=${p.colors}:stats_mode=diff[p];` +
+      `[v1][p]${paletteUse}[v]`;
+
+    const code = await f.exec([
+      "-i",
+      input,
+      "-ss",
+      String(start),
+      "-t",
+      String(duration),
+      "-filter_complex",
+      filter,
+      "-map",
+      "[v]",
+      "-an",
+      "-loop",
+      "0",
+      "-threads",
+      "1",
+      "-y",
+      out,
+    ]);
+    if (code !== 0) throw new Error(`gif:${logs.slice(-12).join(" | ") || `ffmpeg exit ${code}`}`);
+
+    const data = (await f.readFile(out)) as Uint8Array;
+    lastSize = data.byteLength;
+    if (!b.limit || data.byteLength <= b.limit * 1e6) {
+      progress(100);
+      return new Blob([new Uint8Array(data)], { type: "image/gif" });
+    }
+  }
+
+  throw new Error(`gif-limit:${lastSize}`);
+}
+
 export async function exportMedia(
   file: File,
   start: number,
@@ -68,15 +145,14 @@ export async function exportMedia(
   status: (s: string) => void,
 ) {
   const duration = Math.max(0.01, end - start);
+  const sourceExt = file.name.split(".").pop()?.replace(/[^a-z0-9]/gi, "").toLowerCase() || "bin";
+  const sourceIsGif = sourceExt === "gif";
 
   // Medal can produce valid AV1 MP4 files that Chrome/Edge play correctly but
   // the lightweight FFmpeg.wasm decoder fails with "Missing Sequence Header".
-  // Detect `av01` in the MP4 metadata and let the browser decode only the
-  // selected section to a temporary WebM. FFmpeg then receives a small,
-  // compatible clip instead of decoding the original AV1 stream.
   let browserIntermediate: Blob | null = null;
   let sourceWasBrowserAv1 = false;
-  if (video) {
+  if (video && !sourceIsGif) {
     try {
       sourceWasBrowserAv1 = await looksLikeAv1(file);
     } catch {
@@ -97,14 +173,8 @@ export async function exportMedia(
   status(sourceWasBrowserAv1 ? "Preparando exportación final…" : "Preparando motor local…");
   const f = await getEngine();
 
-  const ext =
-    file.name
-      .split(".")
-      .pop()
-      ?.replace(/[^a-z0-9]/gi, "")
-      .toLowerCase() || "bin";
-  const input = sourceWasBrowserAv1 ? "browser-av1.webm" : `input.${ext}`;
-  const trimmed = `trimmed.${ext}`;
+  const input = sourceWasBrowserAv1 ? "browser-av1.webm" : `input.${sourceExt}`;
+  const trimmed = `trimmed.${sourceExt}`;
   const out = `output.${s.format}`;
 
   const logs: string[] = [];
@@ -139,13 +209,13 @@ export async function exportMedia(
       try {
         sourceCodec = await detectVideoCodec(f, input, logs);
       } catch {
-        sourceCodec = "unknown";
+        sourceCodec = sourceIsGif ? "gif" : "unknown";
       }
     }
 
     const isHevc = sourceCodec === "hevc" || sourceCodec === "h265";
 
-    if (video && !sourceWasBrowserAv1) {
+    if (video && !sourceWasBrowserAv1 && !sourceIsGif) {
       const padBefore = Math.min(isHevc ? 4 : 3, Math.max(0, start));
       const preStart = Math.max(0, start - padBefore);
       const preDuration = duration + padBefore + 3;
@@ -185,6 +255,20 @@ export async function exportMedia(
         workingInput = input;
         workingStart = start;
       }
+    }
+
+    if (video && s.format === "gif") {
+      return await encodeGif(
+        f,
+        workingInput,
+        out,
+        workingStart,
+        duration,
+        s,
+        progress,
+        status,
+        logs,
+      );
     }
 
     const b = budget(duration, s, video);
@@ -242,6 +326,44 @@ export async function exportMedia(
     f.off("log", logListener);
     if (!inputDeleted) await safeDelete(f, input);
     await safeDelete(f, trimmed);
+    await safeDelete(f, out);
+  }
+}
+
+export async function gifPreview(file: File) {
+  const f = await getEngine();
+  const input = "gif-preview-input.gif";
+  const out = "gif-preview.webm";
+  try {
+    await f.writeFile(input, new Uint8Array(await file.arrayBuffer()));
+    const code = await f.exec([
+      "-i",
+      input,
+      "-an",
+      "-vf",
+      "scale='min(960,iw)':-2:flags=fast_bilinear",
+      "-c:v",
+      "libvpx",
+      "-crf",
+      "32",
+      "-b:v",
+      "0",
+      "-deadline",
+      "realtime",
+      "-cpu-used",
+      "8",
+      "-pix_fmt",
+      "yuv420p",
+      "-threads",
+      "1",
+      "-y",
+      out,
+    ]);
+    if (code !== 0) throw new Error("gif-preview");
+    const bytes = (await f.readFile(out)) as Uint8Array;
+    return new Blob([new Uint8Array(bytes)], { type: "video/webm" });
+  } finally {
+    await safeDelete(f, input);
     await safeDelete(f, out);
   }
 }
