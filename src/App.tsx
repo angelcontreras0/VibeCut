@@ -87,16 +87,16 @@ export default function App() {
   );
   useEffect(() => {
     if (error) {
-      document.title = "VibeCut — Error";
+      document.title = "⚠ Error — VibeCut";
       return;
     }
     if (busy) {
       const pct = Math.max(0, Math.min(100, Math.round(progress)));
-      document.title = pct > 0 ? `VibeCut — ${pct}%` : "VibeCut — Renderizando...";
+      document.title = pct > 0 ? `${pct}% — VibeCut` : "Exportando… — VibeCut";
       return;
     }
     if (result) {
-      document.title = "VibeCut — Listo ✓";
+      document.title = "✓ Listo — VibeCut";
       return;
     }
     document.title = "VibeCut";
